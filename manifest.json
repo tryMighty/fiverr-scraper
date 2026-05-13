@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Mighty's Fiverr Scraper",
+  "version": "2.0",
+  "description": "Autonomous deep-extraction agent for Fiverr gig rankings, seller profiles, ratings, and keyword intelligence.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.fiverr.com/*"
+  ]
+}

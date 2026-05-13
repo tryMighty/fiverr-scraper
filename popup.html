@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mighty's Fiverr Scraper</title>
+  <link rel="stylesheet" href="popup.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- Ambient background orbs -->
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+
+  <div class="app">
+
+    <!-- ── Header ──────────────────────────────────────────────── -->
+    <header class="header glass">
+      <div class="robot-avatar">
+        <div class="robot-face">
+          <div class="robot-eyes">
+            <div class="robot-eye" id="eye-left"><div class="pupil"></div></div>
+            <div class="robot-eye" id="eye-right"><div class="pupil"></div></div>
+          </div>
+          <div class="robot-mouth" id="robot-mouth"></div>
+        </div>
+        <div class="avatar-ring"></div>
+        <div class="avatar-ping"></div>
+      </div>
+
+      <div class="header-titles">
+        <div class="brand-row">
+          <span class="brand-mighty">Mighty's</span>
+          <span class="tier-chip">v2.0</span>
+        </div>
+        <div class="brand-full">
+          <span class="brand-fiverr">Fiverr</span>
+          <span class="brand-scraper">Scraper</span>
+        </div>
+      </div>
+
+      <div class="signal-stack">
+        <div class="signal-bar s1"></div>
+        <div class="signal-bar s2"></div>
+        <div class="signal-bar s3"></div>
+        <div class="signal-bar s4"></div>
+      </div>
+    </header>
+
+    <!-- ── Status Strip ─────────────────────────────────────────── -->
+    <div class="status-strip glass" id="status-strip">
+      <div class="status-indicator" id="status-dot"></div>
+      <span class="status-text mono" id="status-text">SYSTEM READY — AWAITING COMMAND</span>
+    </div>
+
+    <!-- ── Setup View ───────────────────────────────────────────── -->
+    <div class="panel" id="setup-view">
+
+      <div class="field">
+        <label class="field-label" for="keyword-input">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="label-icon">
+            <path d="m15.89 14.653-3.793-3.794a.37.37 0 0 0-.266-.109h-.412A6.499 6.499 0 0 0 6.5 0C2.91 0 0 2.91 0 6.5a6.499 6.499 0 0 0 10.75 4.919v.412c0 .1.04.194.11.266l3.793 3.794a.375.375 0 0 0 .531 0l.707-.707a.375.375 0 0 0 0-.53ZM6.5 11.5c-2.763 0-5-2.238-5-5 0-2.763 2.237-5 5-5 2.762 0 5 2.237 5 5 0 2.762-2.238 5-5 5Z" fill="currentColor"/>
+          </svg>
+          Target Keyword
+        </label>
+        <div class="input-wrap">
+          <input type="text" id="keyword-input" placeholder="e.g. framer website design" autocomplete="off" spellcheck="false" />
+          <div class="input-glow"></div>
+        </div>
+      </div>
+
+      <div class="toggle-row glass">
+        <div class="toggle-info">
+          <span class="toggle-label">
+            <span class="led-dot"></span>
+            Autonomous Mode
+          </span>
+          <span class="toggle-hint mono">Browser takeover · Virtual cursor · Lockout</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autonomous-toggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="features-grid">
+        <div class="feature-chip glass">
+          <span class="chip-icon">⬡</span>
+          <span>Dropdown Keywords</span>
+        </div>
+        <div class="feature-chip glass">
+          <span class="chip-icon">⬡</span>
+          <span>Gig Packages</span>
+        </div>
+        <div class="feature-chip glass">
+          <span class="chip-icon">⬡</span>
+          <span>Ratings &amp; Level</span>
+        </div>
+        <div class="feature-chip glass">
+          <span class="chip-icon">⬡</span>
+          <span>Seller Profiles</span>
+        </div>
+      </div>
+
+      <button id="start-btn" class="btn-start">
+        <span class="btn-icon">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 5v14l11-7z" fill="currentColor"/>
+          </svg>
+        </span>
+        INITIALIZE ENGINE
+        <span class="btn-shimmer"></span>
+      </button>
+    </div>
+
+    <!-- ── Running View ──────────────────────────────────────────── -->
+    <div class="panel hidden" id="running-view">
+
+      <div class="progress-card glass">
+        <div class="progress-header">
+          <span class="progress-label mono">EXTRACTION PROGRESS</span>
+          <span class="progress-pct mono" id="progress-pct">—</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="progress-bar"></div>
+          <div class="progress-shimmer"></div>
+        </div>
+        <div class="progress-stats mono" id="progress-stats">Initializing neural extraction…</div>
+      </div>
+
+      <div class="feed-header">
+        <span class="feed-label mono">LIVE DATA STREAM</span>
+        <span class="feed-count mono" id="feed-count">0 gigs</span>
+      </div>
+
+      <div class="feed" id="results-feed">
+        <div class="feed-empty">
+          <div class="radar-ring"></div>
+          <div class="radar-ring r2"></div>
+          <div class="radar-dot"></div>
+          <span class="mono">Scanning Fiverr…</span>
+        </div>
+      </div>
+
+      <button id="stop-btn" class="btn-stop glass">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor"/>
+        </svg>
+        TERMINATE &amp; SAVE
+      </button>
+    </div>
+
+    <!-- ── Footer — GitHub ───────────────────────────────────────── -->
+    <footer class="footer glass">
+      <a href="https://github.com/tryMighty" target="_blank" class="gh-link" id="gh-link">
+        <svg class="gh-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+          <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
+        </svg>
+        <span class="gh-text">tryMighty</span>
+      </a>
+      <span class="footer-sep">·</span>
+      <span class="footer-copy mono">Mighty's Fiverr Scraper v2.0</span>
+    </footer>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
