@@ -161,25 +161,34 @@ if (!window.__fiverrScraperLoaded) {
     );
     input.value = '';
 
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+
     for (const ch of keyword) {
-      input.value += ch;
+      nativeInputValueSetter.call(input, input.value + ch);
       input.dispatchEvent(new Event('input',   { bubbles: true }));
       input.dispatchEvent(new Event('keydown', { bubbles: true }));
       input.dispatchEvent(new Event('keyup',   { bubbles: true }));
       await sleep(60 + Math.random() * 60);
     }
 
-    setStatus('Waiting for Suggestions', 'Holding 15 s for Fiverr to rank keywords…');
+    setStatus('Waiting for Suggestions', 'Holding 8 s for Fiverr to rank keywords…');
 
-    // Wait the full 15 seconds so Fiverr has time to rank all suggestions
-    await sleep(15000);
+    // Wait 8 seconds so Fiverr has time to fetch and render autocomplete
+    await sleep(8000);
 
-    // Single read after the full wait
-    const suggBtns = document.querySelectorAll(
-      'ul[data-impression-id="suggest-tags"] li button'
+    // Read suggestions covering multiple known Fiverr DOM structures
+    const suggEls = document.querySelectorAll(
+      'ul[data-impression-id="suggest-tags"] li button, ' +
+      'ul[data-impression-id="suggest-tags"] li span, ' +
+      'ul[role="listbox"] li[role="option"], ' +
+      '.search-suggestions ul li, ' +
+      '.suggest-list ul li, ' +
+      '.Macromn ul li' // A common obfuscated class on Fiverr search dropdowns
     );
-    const suggestions = Array.from(suggBtns)
-      .map(b => b.innerText.trim())
+    
+    // We get innerText, split by newlines (in case of child spans), take the first meaningful line
+    const suggestions = Array.from(suggEls)
+      .map(el => el.innerText.trim().split('\n')[0].trim())
       .filter(Boolean);
 
     setStatus('Suggestions Ready', `Found ${suggestions.length} keywords`);
