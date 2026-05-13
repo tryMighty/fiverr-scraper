@@ -11,7 +11,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const resultsFeed    = document.getElementById('results-feed');
   const feedCount      = document.getElementById('feed-count');
   const progressBar    = document.getElementById('progress-bar');
-  const progressPct    = document.getElementById('progress-pct');
   const progressStats  = document.getElementById('progress-stats');
   const robotMouth     = document.getElementById('robot-mouth');
   const eyeLeft        = document.getElementById('eye-left');
@@ -103,7 +102,6 @@ document.addEventListener('DOMContentLoaded', () => {
       feedInitialized   = false;
       feedCount.textContent = '0 gigs';
       progressBar.style.width = '0';
-      progressPct.textContent = '—';
       progressStats.textContent = 'Initializing…';
       resetFeed();
     }
@@ -132,7 +130,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setProgress(pct, gigsTotal, kwTotal, kwDone) {
     progressBar.style.width = pct + '%';
-    progressPct.textContent = pct + '%';
     progressStats.textContent =
       gigsTotal + ' gigs extracted' +
       (kwTotal > 0 ? ' · ' + kwDone + '/' + kwTotal + ' keywords' : '');
