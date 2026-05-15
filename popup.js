@@ -7,6 +7,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusText     = document.getElementById('status-text');
   const statusDot      = document.getElementById('status-dot');
   const setupView      = document.getElementById('setup-view');
+  const selectionView  = document.getElementById('selection-view');
   const runningView    = document.getElementById('running-view');
   const resultsFeed    = document.getElementById('results-feed');
   const feedCount      = document.getElementById('feed-count');
@@ -15,6 +16,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const robotMouth     = document.getElementById('robot-mouth');
   const eyeLeft        = document.getElementById('eye-left');
   const eyeRight       = document.getElementById('eye-right');
+
+  // Selection-view refs
+  const selKeywordList = document.getElementById('sel-keyword-list');
+  const selAllBtn      = document.getElementById('sel-all-btn');
+  const selNoneBtn     = document.getElementById('sel-none-btn');
+  const extractBtn     = document.getElementById('extract-btn');
 
   let totalGigsCaptures = 0;
   let totalKeywords     = 0;
@@ -31,7 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') startBtn.click();
   });
 
-  // ── Start ─────────────────────────────────────────────────────────────────
+  // ── Phase 1: Initialize — fetch suggestions ───────────────────────────────
   startBtn.addEventListener('click', () => {
     const keyword = keywordInput.value.trim();
     if (!keyword) {
@@ -46,13 +53,36 @@ document.addEventListener('DOMContentLoaded', () => {
       const activeTab = tabs[0];
       if (!activeTab) { setStatus('No active tab found.', 'error'); return; }
 
+      // Show the status strip as active while we wait for suggestions
+      setStatus('🔍 Fetching keyword suggestions…', 'active');
+      setRobotMode(true);
+
       chrome.runtime.sendMessage({
-        action:      'startSearchAndScrape',
-        tabId:       activeTab.id,
+        action:       'startSearchAndScrape',
+        tabId:        activeTab.id,
         keyword,
         isAutonomous: autoToggle.checked
       });
     });
+  });
+
+  // ── Phase 2: Extract selected keywords ────────────────────────────────────
+  extractBtn.addEventListener('click', () => {
+    const checked = Array.from(selKeywordList.querySelectorAll('input[type="checkbox"]:checked'))
+      .map(cb => cb.value);
+
+    if (checked.length === 0) {
+      // Flash the list border if nothing is selected
+      selKeywordList.style.borderColor = '#e84040';
+      selKeywordList.style.boxShadow   = '0 0 0 2px rgba(232,64,64,.2)';
+      setTimeout(() => {
+        selKeywordList.style.borderColor = '';
+        selKeywordList.style.boxShadow   = '';
+      }, 1800);
+      return;
+    }
+
+    chrome.runtime.sendMessage({ action: 'confirmKeywords', keywords: checked });
   });
 
   // ── Stop ──────────────────────────────────────────────────────────────────
@@ -60,13 +90,29 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.runtime.sendMessage({ action: 'stopScraping' });
   });
 
-  // ── Listen for background updates ────────────────────────────────────────
+  // ── Bulk select / deselect ────────────────────────────────────────────────
+  selAllBtn.addEventListener('click', () => {
+    selKeywordList.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = true; });
+  });
+  selNoneBtn.addEventListener('click', () => {
+    selKeywordList.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+  });
+
+  // ── Listen for background updates ─────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.action !== 'updateStatus') return;
     const d = msg.data;
+
+    // Check if background wants us to show the keyword selection screen
+    if (d.awaitingSelection && Array.isArray(d.suggestedKeywords)) {
+      renderSelectionView(d.suggestedKeywords, d.seedKeyword || '');
+      setStatus('🔎 Choose keywords to extract', 'active');
+      setRobotMode(false);
+      return;
+    }
+
     updateUI(d);
 
-    // Update progress numbers from rich status data
     if (typeof d.totalKeywords  === 'number') totalKeywords     = d.totalKeywords;
     if (typeof d.doneKeywords   === 'number') processedKeywords = d.doneKeywords;
 
@@ -75,7 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
       : 0;
     if (d.isScraping) setProgress(pct, d.totalGigs || 0, totalKeywords, processedKeywords);
 
-    // Render new gigs to feed
+    // Append new gigs to the feed
     if (Array.isArray(d.latestGigs) && d.latestGigs.length > totalGigsCaptures) {
       const newItems = d.latestGigs.slice(totalGigsCaptures);
       renderFeedItems(newItems);
@@ -84,18 +130,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ── Render keyword selection panel ────────────────────────────────────────
+  function renderSelectionView(keywords, seedKeyword) {
+    selKeywordList.innerHTML = '';
+
+    keywords.forEach((kw, i) => {
+      const isSeed = kw.toLowerCase() === seedKeyword.toLowerCase();
+      const id     = 'sel-kw-' + i;
+
+      const label = document.createElement('label');
+      label.className = 'sel-item';
+      label.htmlFor   = id;
+
+      label.innerHTML =
+        `<input type="checkbox" id="${escHtml(id)}" value="${escHtml(kw)}" ${isSeed || i === 0 ? 'checked' : ''}>` +
+        `<span class="sel-check"></span>` +
+        `<span class="sel-kw-label">${escHtml(kw)}</span>` +
+        (isSeed || i === 0 ? `<span class="sel-badge-seed">seed</span>` : '');
+
+      selKeywordList.appendChild(label);
+    });
+
+    // Show selection view, hide others
+    setupView.classList.add('hidden');
+    runningView.classList.add('hidden');
+    selectionView.classList.remove('hidden');
+  }
+
   // ── UI State management ───────────────────────────────────────────────────
   function updateUI(data) {
-    setStatus(data.statusText, data.isScraping ? 'active' : (data.statusText.includes('Done') ? 'done' : 'idle'));
+    setStatus(data.statusText, data.isScraping ? 'active' : (data.statusText?.includes('Done') ? 'done' : 'idle'));
     setRobotMode(data.isScraping);
 
     if (data.isScraping) {
       setupView.classList.add('hidden');
+      selectionView.classList.add('hidden');
       runningView.classList.remove('hidden');
-    } else {
+    } else if (!data.awaitingSelection) {
+      // Back to setup (idle / done / error)
       setupView.classList.remove('hidden');
+      selectionView.classList.add('hidden');
       runningView.classList.add('hidden');
-      // Reset feed for next run
+      // Reset counters for next run
       totalGigsCaptures = 0;
       processedKeywords = 0;
       totalKeywords     = 0;
@@ -111,7 +187,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function setRobotMode(active) {
     if (!robotMouth) return;
     if (active) {
-      // Faster talking mouth + brighter eyes during scrape
       robotMouth.style.animationDuration = '0.6s';
       if (eyeLeft)  eyeLeft.style.boxShadow  = '0 0 12px rgba(29,191,115,.9)';
       if (eyeRight) eyeRight.style.boxShadow = '0 0 12px rgba(29,191,115,.9)';
@@ -124,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function setStatus(text, mode /* 'active' | 'done' | 'error' | 'idle' */) {
     statusText.textContent = String(text).toUpperCase();
-    statusDot.className = 'status-dot';
+    statusDot.className = 'status-indicator';
     if (mode && mode !== 'idle') statusDot.classList.add(mode);
   }
 
@@ -139,8 +214,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function resetFeed() {
     resultsFeed.innerHTML =
       '<div class="feed-empty">' +
-        '<div class="pulse-ring"></div>' +
-        '<span>Waiting for data stream\u2026</span>' +
+        '<div class="radar-ring"></div>' +
+        '<div class="radar-ring r2"></div>' +
+        '<div class="radar-dot"></div>' +
+        '<span class="mono">Waiting for data stream\u2026</span>' +
       '</div>';
   }
 
@@ -167,7 +244,6 @@ document.addEventListener('DOMContentLoaded', () => {
       const el = document.createElement('div');
       el.className = 'feed-item';
 
-      // Suppress N/A from display — only show real values
       const ratingStr  = (rating  && rating  !== 'N/A') ? rating  : '';
       const reviewsStr = (reviews && reviews !== 'N/A') ? reviews : '';
       const levelStr   = (level   && level   !== 'N/A') ? level   : '';
@@ -188,7 +264,6 @@ document.addEventListener('DOMContentLoaded', () => {
       resultsFeed.insertBefore(el, resultsFeed.firstChild);
     });
 
-    // Keep feed from getting too long in the DOM
     const maxItems = 40;
     while (resultsFeed.children.length > maxItems) {
       resultsFeed.removeChild(resultsFeed.lastChild);

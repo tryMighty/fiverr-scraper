@@ -14,7 +14,8 @@
     "tabs",
     "scripting",
     "downloads",
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "*://*.fiverr.com/*"

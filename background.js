@@ -1,92 +1,192 @@
-// ─── State ────────────────────────────────────────────────────────────────────
-let isScraping        = false;
-let isAutonomous      = false;
-let scrapedData       = [];   // Final aggregated export
-let searchTabId       = null;
-let keywordQueue      = [];
-let totalKeywordsCount = 0;   // Locked in once the queue is built
-let currentKeyword    = '';
-let doneKeywords      = 0;    // How many keywords have been fully processed
+// ─── State Management (Persistent via chrome.storage.local) ───────────────
+const defaultState = {
+  isScraping: false,
+  isAutonomous: false,
+  scrapedData: [],      // Final aggregated export
+  searchTabId: null,
+  keywordQueue: [],
+  totalKeywordsCount: 0,
+  doneKeywords: 0,
+  awaitingSelection: false,
+  currentKeyword: '',
+  seedKeyword: '',
+  suggestedKeywords: []
+};
+
+let memState = { ...defaultState };
+
+// Initialize state from storage on startup
+chrome.storage.local.get(['fiverrState'], (result) => {
+  if (result.fiverrState) {
+    memState = result.fiverrState;
+    // If it was scraping when the worker died, we could auto-resume here,
+    // but for safety, we just mark it as paused so the user can resume manually.
+    if (memState.isScraping) {
+      memState.isScraping = false;
+      saveState();
+    }
+  }
+});
+
+async function saveState(updates = {}) {
+  memState = { ...memState, ...updates };
+  await chrome.storage.local.set({ fiverrState: memState });
+}
+
+async function getState() {
+  const result = await chrome.storage.local.get(['fiverrState']);
+  if (result.fiverrState) memState = result.fiverrState;
+  return memState;
+}
 
 // ─── Message Router ───────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'getStatus') {
     sendResponse(buildStatus());
+    
   } else if (msg.action === 'startSearchAndScrape') {
-    runAgent(msg.tabId, msg.keyword, msg.isAutonomous);
+    fetchSuggestions(msg.tabId, msg.keyword, msg.isAutonomous);
+    
+  } else if (msg.action === 'confirmKeywords') {
+    if (memState.awaitingSelection) {
+      saveState({ awaitingSelection: false }).then(() => {
+        runExtraction(msg.keywords);
+      });
+    }
+    
   } else if (msg.action === 'stopScraping') {
-    isScraping = false;
-    broadcast('Scraping stopped by user.');
+    saveState({ isScraping: false, awaitingSelection: false }).then(() => {
+      broadcast('Scraping stopped by user.');
+    });
   }
   return true;
 });
 
 // ─── Status Helpers ───────────────────────────────────────────────────────────
 function buildStatus() {
-  const totalGigs = scrapedData.reduce((n, kw) => n + kw.gigs.length, 0);
+  const totalGigs = memState.scrapedData.reduce((n, kw) => n + (kw.gigs?.length || 0), 0);
   return {
-    isScraping,
-    statusText: isScraping
-      ? `🔍 Processing: "${currentKeyword}" — ${totalGigs} gigs captured`
-      : (scrapedData.length > 0
-          ? `✅ Done! ${totalGigs} gigs across ${scrapedData.length} keywords.`
-          : 'Ready to initialize.'),
+    isScraping: memState.isScraping,
+    awaitingSelection: memState.awaitingSelection,
+    statusText: memState.isScraping
+      ? `🔍 Processing: "${memState.currentKeyword}" — ${totalGigs} gigs captured`
+      : (memState.awaitingSelection
+          ? '🔎 Select keywords to extract'
+          : (memState.scrapedData.length > 0
+              ? `✅ Done! ${totalGigs} gigs across ${memState.scrapedData.length} keywords.`
+              : 'Ready to initialize.')),
     totalGigs,
-    totalKeywords: totalKeywordsCount,
-    doneKeywords,
-    latestGigs: scrapedData.flatMap(k => k.gigs).slice(-50)
+    totalKeywords: memState.totalKeywordsCount,
+    doneKeywords: memState.doneKeywords,
+    latestGigs: memState.scrapedData.flatMap(k => k.gigs || []).slice(-50),
+    suggestedKeywords: memState.suggestedKeywords,
+    seedKeyword: memState.seedKeyword
   };
 }
 
-function broadcast(text) {
+async function broadcast(text, extra = {}) {
+  const status = buildStatus();
   chrome.runtime.sendMessage({
     action: 'updateStatus',
-    data:   { ...buildStatus(), statusText: text }
+    data:   { ...status, ...extra, statusText: text }
   }).catch(() => {});
 }
 
-// ─── Main Agent Entry Point ───────────────────────────────────────────────────
-async function runAgent(tabId, seedKeyword, autonomous) {
-  isScraping    = true;
-  isAutonomous  = !!autonomous;
-  scrapedData   = [];
-  searchTabId   = tabId;
-  doneKeywords  = 0;
+// ─── Keep-Alive Ping ─────────────────────────────────────────────────────────
+// Continuously ping ourselves or the content script to extend MV3 lifetime
+setInterval(() => {
+  if (memState.isScraping && memState.searchTabId) {
+    chrome.tabs.sendMessage(memState.searchTabId, { action: 'ping' }).catch(() => {});
+  }
+}, 20000);
+
+// ─── Phase 1: Fetch Suggestions ───────────────────────────────────────────────
+async function fetchSuggestions(tabId, seedKeyword, autonomous) {
+  await saveState({
+    isScraping: false,
+    isAutonomous: !!autonomous,
+    scrapedData: [],
+    searchTabId: tabId,
+    doneKeywords: 0,
+    keywordQueue: [],
+    awaitingSelection: false,
+    seedKeyword,
+    suggestedKeywords: []
+  });
 
   broadcast('Initializing — navigating to Fiverr…');
 
   try {
-    // ── Step 1: Homepage → type keyword → collect dropdown suggestions ────────
-    await goTo(searchTabId, 'https://www.fiverr.com/');
-    await injectContent(searchTabId);
-    await sendTab(searchTabId, { action: 'initAgentMode' });
+    const searchUrl = `https://www.fiverr.com/search/gigs?query=${encodeURIComponent(seedKeyword)}`;
+    await goTo(tabId, searchUrl);
+    await injectContent(tabId);
+    await sendTab(tabId, { action: 'initAgentMode' });
 
-    const sugResp  = await sendTab(searchTabId, { action: 'getSearchSuggestions', keyword: seedKeyword });
-    const suggestions = sugResp?.suggestions || [];
+    broadcast('Typing keyword and triggering autocomplete…');
+    const sugResp  = await sendTab(tabId, { action: 'getSearchSuggestions', keyword: seedKeyword }, 35000);
+    const rawSuggs = sugResp?.suggestions || [];
 
-    // Deduplicate: seed keyword often appears in the dropdown too
-    const seen = new Set();
-    keywordQueue = [seedKeyword, ...suggestions].filter(kw => {
-      const key = kw.toLowerCase().trim();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    totalKeywordsCount = keywordQueue.length; // Lock in the count for progress tracking
-    broadcast(`Keyword expansion: ${keywordQueue.length} unique keywords queued`);
-    await sleep(1500);
-
-    // ── Step 2: For every keyword → search results → extract gig links ────────
-    for (const kw of keywordQueue) {
-      if (!isScraping) break;
-      currentKeyword = kw;
-      await processKeyword(kw); // result is already live in scrapedData
-      doneKeywords++;
-      broadcast(`Completed "${kw}" — ${doneKeywords}/${totalKeywordsCount} keywords done`);
+    if (sugResp?.error) {
+      console.warn('[FiverrScraper] Suggestion error:', sugResp.error);
     }
 
+    const seen = new Set();
+    const allKeywords = [seedKeyword, ...rawSuggs].filter(kw => {
+      const key = kw.toLowerCase().trim();
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+
+    await saveState({
+      awaitingSelection: true,
+      suggestedKeywords: allKeywords
+    });
+
+    broadcast(`Found ${allKeywords.length} keywords — choose which to extract`, {
+      awaitingSelection: true,
+      suggestedKeywords: allKeywords,
+      seedKeyword
+    });
+
   } catch (err) {
-    console.error('[FiverrScraper] Agent error:', err);
+    console.error('[FiverrScraper] fetchSuggestions error:', err);
+    broadcast(`Error: ${err.message}`);
+  }
+}
+
+// ─── Phase 2: Run Extraction for Confirmed Keywords ───────────────────────────
+async function runExtraction(selectedKeywords) {
+  if (!selectedKeywords || selectedKeywords.length === 0) {
+    broadcast('No keywords selected — nothing to extract.');
+    return;
+  }
+
+  await saveState({
+    isScraping: true,
+    keywordQueue: selectedKeywords,
+    totalKeywordsCount: selectedKeywords.length,
+    doneKeywords: 0,
+    scrapedData: [] // reset on new job
+  });
+
+  broadcast(`Starting extraction for ${selectedKeywords.length} keyword(s)…`);
+
+  try {
+    for (const kw of memState.keywordQueue) {
+      await getState();
+      if (!memState.isScraping) break;
+      
+      await saveState({ currentKeyword: kw });
+      await processKeyword(kw);
+      
+      await getState();
+      if (!memState.isScraping) break; // Check again in case stopped during processing
+      
+      await saveState({ doneKeywords: memState.doneKeywords + 1 });
+      broadcast(`Completed "${kw}" — ${memState.doneKeywords}/${memState.totalKeywordsCount} keywords done`);
+    }
+  } catch (err) {
+    console.error('[FiverrScraper] Extraction error:', err);
     broadcast(`Error: ${err.message}`);
   }
 
@@ -98,119 +198,175 @@ async function processKeyword(keyword) {
   broadcast(`Searching: "${keyword}"`);
 
   const searchUrl = `https://www.fiverr.com/search/gigs?query=${encodeURIComponent(keyword)}`;
-  await goTo(searchTabId, searchUrl);
-  await injectContent(searchTabId);
-  if (isAutonomous) await sendTab(searchTabId, { action: 'initAgentMode' });
+  await goTo(memState.searchTabId, searchUrl);
+  await injectContent(memState.searchTabId);
+  if (memState.isAutonomous) await sendTab(memState.searchTabId, { action: 'initAgentMode' });
 
-  // Get ranked gig links (already includes gig title from the card)
-  const linkResp = await sendTab(searchTabId, { action: 'extractGigLinks' });
+  // Get ranked gig links from page 1 only
+  const linkResp = await sendTab(memState.searchTabId, { action: 'extractGigLinks' });
   const links    = linkResp?.links || [];
 
   broadcast(`"${keyword}" — found ${links.length} gigs on page 1`);
 
-  // —— Push a live placeholder into scrapedData immediately so buildStatus()
-  // can serve fresh gigs to the popup during the loop (not just after it ends).
+  // Initialize keyword result object
   const kwResult = { keyword, totalGigs: 0, gigs: [] };
-  scrapedData.push(kwResult);
+  
+  // Update state immediately
+  await getState();
+  const newScrapedData = [...memState.scrapedData, kwResult];
+  await saveState({ scrapedData: newScrapedData });
 
-  for (const linkObj of links) {
-    if (!isScraping) break;
+  for (let i = 0; i < links.length; i++) {
+    const linkObj = links[i];
+    await getState();
+    if (!memState.isScraping) break;
+    
     broadcast(`Extracting gig ${linkObj.rank}/${links.length} for "${keyword}"…`);
 
     try {
-      // ── A. Navigate to gig page and extract from live React DOM ────────────
-      // We navigate directly instead of using fetch() so that:
-      //   1. React renders ALL 3 package tiers (not just the active SSR tab)
-      //   2. window.__INITIAL_STATE__ is live and fully populated
-      //   3. Rating, image, and FAQ are immediately available in the DOM
+      // ── A. Navigate to gig page ──────
       broadcast(`Loading gig page ${linkObj.rank}/${links.length}…`);
-      await goTo(searchTabId, linkObj.url);
-      await injectContent(searchTabId);
-      if (isAutonomous) await sendTab(searchTabId, { action: 'initAgentMode' });
-      await sleep(1500); // Let React hydrate
+      await goTo(memState.searchTabId, linkObj.url);
+      await injectContent(memState.searchTabId);
+      if (memState.isAutonomous) await sendTab(memState.searchTabId, { action: 'initAgentMode' });
+      await sleep(1500); 
 
-      const gigResp = await sendTab(searchTabId, { action: 'extractLiveGigData' });
+      const gigResp = await sendTab(memState.searchTabId, { action: 'extractLiveGigData' });
       const gigData = gigResp?.gigData || {};
 
-      // Card title from search is a reliable fallback for the slug title
       if (!gigData.title && linkObj.title) gigData.title = linkObj.title;
 
-      // ── B. Navigate to seller profile and deep-extract ─────────────────────
-      // Username is always derivable from the gig URL: fiverr.com/{username}/{slug}
-      // We use this directly instead of waiting for gigData.extractedUsername
-      // so seller profiling always runs even if __INITIAL_STATE__ parsing failed.
+      // ── B. Navigate to seller profile and deep-extract ────────────────────────
       let sellerData = null;
-      const username =
-        gigData.extractedUsername ||
+      const username = gigData.extractedUsername || 
         (() => { try { return new URL(linkObj.url).pathname.split('/').filter(Boolean)[0]; } catch(_){return '';} })();
 
       if (username) {
         try {
           const profileUrl = `https://www.fiverr.com/${username}`;
           broadcast(`Loading profile: ${username}…`);
-          await goTo(searchTabId, profileUrl);
-          await injectContent(searchTabId);
-          if (isAutonomous) await sendTab(searchTabId, { action: 'initAgentMode' });
-          await sleep(1500); // Let profile page hydrate
+          await goTo(memState.searchTabId, profileUrl);
+          await injectContent(memState.searchTabId);
+          if (memState.isAutonomous) await sendTab(memState.searchTabId, { action: 'initAgentMode' });
+          await sleep(1500);
 
-          const sellerResp = await sendTab(searchTabId, { action: 'deepExtractSeller' });
-          sellerData = sellerResp?.sellerData || { username }; // Always return at least username
+          const sellerResp = await sendTab(memState.searchTabId, { action: 'deepExtractSeller' });
+          sellerData = sellerResp?.sellerData || { username };
         } catch (sellerErr) {
           console.warn('[FiverrScraper] Seller fetch failed for', username, sellerErr.message);
-          sellerData = { username, error: sellerErr.message }; // Never return null
+          sellerData = { username, error: sellerErr.message };
         }
       }
 
-      kwResult.gigs.push({
-        keyword,
-        rank:   linkObj.rank,
-        gigUrl: linkObj.url,
-        gig:    gigData,
-        seller: sellerData
-      });
+      // Add the gig to our state securely
+      await getState();
+      // Find the keyword entry
+      const updatedData = [...memState.scrapedData];
+      const kwIndex = updatedData.findIndex(k => k.keyword === keyword);
+      if (kwIndex !== -1) {
+        updatedData[kwIndex].gigs.push({
+          keyword,
+          rank:   linkObj.rank,
+          gigUrl: linkObj.url,
+          gig:    gigData,
+          seller: sellerData
+        });
+        updatedData[kwIndex].totalGigs = updatedData[kwIndex].gigs.length;
+        await saveState({ scrapedData: updatedData });
+      }
 
     } catch (e) {
       console.warn('[FiverrScraper] Gig failed:', linkObj.url, e.message);
-      kwResult.gigs.push({ rank: linkObj.rank, gigUrl: linkObj.url, error: e.message });
+      await getState();
+      const updatedData = [...memState.scrapedData];
+      const kwIndex = updatedData.findIndex(k => k.keyword === keyword);
+      if (kwIndex !== -1) {
+        updatedData[kwIndex].gigs.push({ rank: linkObj.rank, gigUrl: linkObj.url, error: e.message });
+        await saveState({ scrapedData: updatedData });
+      }
     }
 
-    kwResult.totalGigs = kwResult.gigs.length;
-
-    // Broadcast after every gig so the popup feed + counters update in real-time
     broadcast(`Gig ${linkObj.rank}/${links.length} captured for "${keyword}"`);
-
-    // Human-like delay between gigs
-    await sleep(isAutonomous ? 900 + Math.random() * 800 : 400);
+    await sleep(memState.isAutonomous ? 900 + Math.random() * 800 : 400);
   }
-
-  return kwResult;
 }
 
 // ─── Finish & Export ──────────────────────────────────────────────────────────
 async function finish() {
-  isScraping = false;
+  await getState();
+  
+  if (memState.searchTabId) {
+    sendTab(memState.searchTabId, { action: 'stopAgentMode' }).catch(() => {});
+  }
 
-  // Remove overlay from the active tab
-  sendTab(searchTabId, { action: 'stopAgentMode' }).catch(() => {});
-
-  const totalGigs = scrapedData.reduce((n, kw) => n + kw.gigs.length, 0);
+  const totalGigs = memState.scrapedData.reduce((n, kw) => n + (kw.gigs?.length || 0), 0);
 
   if (totalGigs === 0) {
     broadcast('No data extracted.');
+    await saveState({ isScraping: false });
     return;
   }
 
-  broadcast(`Exporting ${totalGigs} gigs across ${scrapedData.length} keywords…`);
+  broadcast(`Exporting ${totalGigs} gigs across ${memState.scrapedData.length} keywords…`);
+
+  const results = memState.scrapedData.map(kwResult => {
+    return {
+      keyword: kwResult.keyword,
+      totalGigs: kwResult.gigs?.length || 0,
+      gigs: (kwResult.gigs || []).map(g => {
+        if (g.error) {
+          return {
+            keyword: kwResult.keyword,
+            rank: g.rank,
+            gigUrl: g.gigUrl,
+            error: g.error
+          };
+        }
+        
+        const gigData = g.gig || {};
+        const sellerData = g.seller || {};
+        
+        return {
+          keyword: kwResult.keyword,
+          rank: g.rank,
+          gigUrl: g.gigUrl,
+          gig: {
+            title: gigData.title || "",
+            description: gigData.description || "",
+            image: gigData.image || "",
+            rating: gigData.rating || "",
+            reviewsCount: gigData.reviewsCount || "",
+            packages: gigData.packages || [],
+            faq: gigData.faq || []
+          },
+          seller: {
+            username: sellerData.username || gigData.extractedUsername || "",
+            publicName: sellerData.publicName || "",
+            sellerLevel: sellerData.sellerLevel || "",
+            rating: sellerData.rating || "",
+            reviewsCount: sellerData.reviewsCount || "",
+            memberSince: sellerData.memberSince || "",
+            country: sellerData.country || "",
+            about: sellerData.about || "",
+            skills: sellerData.skills || [],
+            education: sellerData.education || [],
+            certifications: sellerData.certifications || [],
+            languages: sellerData.languages || []
+          }
+        };
+      })
+    };
+  });
 
   const exportPayload = {
-    meta: {
-      exportedAt:   new Date().toISOString(),
-      seedKeyword:  keywordQueue[0] || '',
-      allKeywords:  keywordQueue,
-      totalKeywords:scrapedData.length,
-      totalGigs
+    metadata: {
+      exportedAt: new Date().toISOString(),
+      seedKeyword: memState.seedKeyword || '',
+      allKeywords: memState.suggestedKeywords || [],
+      totalKeywords: memState.scrapedData.length,
+      totalGigs: totalGigs
     },
-    results: scrapedData
+    results: results
   };
 
   const blob = new Blob(
@@ -218,10 +374,10 @@ async function finish() {
     { type: 'application/json' }
   );
 
-  const slug = (keywordQueue[0] || 'fiverr')
+  const slug = (memState.seedKeyword || 'fiverr')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')   // spaces/symbols → hyphens
-    .replace(/^-+|-+$/g, '');       // trim leading/trailing hyphens
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 
   const reader = new FileReader();
   reader.onload = () => {
@@ -233,32 +389,53 @@ async function finish() {
   };
   reader.readAsDataURL(blob);
 
-  broadcast(`✅ Export complete — ${totalGigs} gigs, ${scrapedData.length} keywords.`);
+  broadcast(`✅ Export complete — ${totalGigs} gigs across ${memState.scrapedData.length} keywords.`);
+  await saveState({ isScraping: false });
 }
 
 // ─── Tab Helpers ──────────────────────────────────────────────────────────────
 
 /** Navigate a tab and wait until it is fully loaded + extra settle time */
 function goTo(tabId, url) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let settled = false;
 
-    const listener = (tid, changeInfo) => {
-      if (tid !== tabId || changeInfo.status !== 'complete' || settled) return;
+    const listener = (tid, changeInfo, tab) => {
+      if (tid !== tabId) return;
+      
+      // If the tab closes, handle the error gracefully
+      if (changeInfo.status === 'unloaded' && !tab) {
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(hardTimeout);
+        return reject(new Error('Tab closed during navigation'));
+      }
+
+      if (changeInfo.status !== 'complete' || settled) return;
       settled = true;
       chrome.tabs.onUpdated.removeListener(listener);
       clearTimeout(hardTimeout);
-      // Extra 3 s for JS/dynamic content to render
       setTimeout(resolve, 3000);
     };
 
     chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.update(tabId, { url });
+    
+    // Explicitly handle failure to even start navigation (e.g., Chrome internal errors)
+    chrome.tabs.update(tabId, { url }).catch(err => {
+      if (!settled) {
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(hardTimeout);
+        reject(err);
+      }
+    });
 
-    // Hard timeout: 15 s max
     const hardTimeout = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
+      if (!settled) {
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(); // We still resolve on hard timeout to keep scraping, though it might be an error page
+      }
     }, 15000);
   });
 }
@@ -270,7 +447,7 @@ async function injectContent(tabId) {
       target: { tabId },
       files:  ['content.js']
     });
-    await sleep(300); // brief pause so the script registers its listener
+    await sleep(300);
   } catch (e) {
     console.warn('[FiverrScraper] Injection warning:', e.message);
   }
